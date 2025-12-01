@@ -1,0 +1,519 @@
+import { Injectable, Inject, forwardRef, BadRequestException, NotFoundException } from '@nestjs/common';
+import axios from 'axios';
+import { Repository } from 'typeorm';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Payment } from '../entities/payment';
+import { BlockedDate } from '../entities/blocked-date';
+import { Booking } from '../entities/booking';
+import { v4 as uuidv4 } from 'uuid';
+import { InitiatePaymentDto } from './dto/initiate-payment.dto';
+import { BookingsService } from '../bookings/bookings.service';
+import * as crypto from 'crypto';
+import { Order } from '../entities/order';
+import { InternationalProduct } from '../entities/international-product';
+
+
+
+import { sendEmail } from "../utils/email";
+import {
+  bridalHireEmail,
+  bridalHireAdminEmail,
+  internationalOrderEmail,
+  internationalAdminEmail,
+  specialOrderAdminEmail,
+  specialOrderEmail
+} from "../utils/emailTemplates";
+import { SpecialOrder } from 'src/entities/special-order';
+
+
+@Injectable()
+export class PaymentsService {
+  constructor(
+    @InjectRepository(Payment) private paymentsRepo: Repository<Payment>,
+    @InjectRepository(BlockedDate) private blockedRepo: Repository<BlockedDate>,
+    @InjectRepository(Booking) private bookingRepo: Repository<Booking>,
+     @InjectRepository(Order) private orderRepo: Repository<Order>,
+       @InjectRepository(InternationalProduct) private internationalRepo: Repository<InternationalProduct>, 
+       @InjectRepository(SpecialOrder) private specialOrderRepo: Repository<SpecialOrder>,
+
+    @Inject(forwardRef(() => BookingsService)) private bookingsService: BookingsService,
+  ) {}
+
+  async createCheckoutSession(dto: InitiatePaymentDto) {
+    // 1) Create temp booking
+    // 1) Generate txRef differently for each type
+let txRef: string;
+
+if (dto.type === 'bridal_hire') {
+  // Create booking only for bridal hire
+  const temp = await this.bookingsService.createTempBooking({
+    firstName: dto.first_name,
+    lastName: dto.last_name,
+    email: dto.email,
+    phoneNumber: dto.phoneNumber,
+    bridalWigId: dto.meta?.wigId,
+    amount: dto.amount,
+    bookingDate: dto.meta?.bookingDate,
+  });
+  txRef = temp.txRef;
+} else {
+  // For international orders, just make a simple reference
+  txRef = `tx_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+}
+
+
+    // 2) Save payment
+    const payment = this.paymentsRepo.create({
+      transactionId: txRef,
+      amount: dto.amount,
+      currency: dto.currency,
+      status: 'pending',
+      method: 'paychangu',
+      type: dto.type,
+      meta: dto.meta,
+    });
+    await this.paymentsRepo.save(payment);
+
+ // inside createCheckoutSession(dto)
+if (dto.type === 'special') {
+  // meta is expected to contain texture, colour, length, totalAmount
+  const meta = dto.meta || {};
+  const total = Number(meta.totalAmount ?? (dto.amount * 2)); // fallback
+  const deposit = Number(dto.amount);
+
+  const specialOrder = this.specialOrderRepo.create({
+    texture: meta.texture,
+    colour: meta.colour,
+    length: meta.length,
+    totalAmount: total,
+    depositAmount: deposit,
+    balanceAmount: Math.max(0, total - deposit),
+    status: 'pending',
+    txRef, // txRef generated above
+    deliveryWindowDays: 14,
+    first_name: dto.first_name,
+    last_name: dto.last_name,
+    email: dto.email,
+    phoneNumber: dto.phoneNumber,
+    district: meta.district,
+
+    user: dto.userId ? ({ id: dto.userId } as any) : undefined,
+  });
+  await this.specialOrderRepo.save(specialOrder);
+
+  payment.meta = { ...(payment.meta || {}), specialOrderId: specialOrder.id };
+  await this.paymentsRepo.save(payment);
+}
+
+ 
+ 
+    // ✅ 2.5) If international order, create order record
+if (dto.type === 'international') {
+  // Safely extract meta
+  const meta = dto.meta || {};
+
+  if (!meta.productId) {
+    throw new BadRequestException("productId is required for international orders");
+  }
+   
+  // 1️⃣ Fetch the product entity
+  const internationalProduct = await this.internationalRepo.findOne({
+    where: { id: meta.productId },
+  });
+
+  if (!internationalProduct) {
+    throw new NotFoundException("International product not found");
+  }
+
+  // 2️⃣ Create the order with full entity
+  const order = this.orderRepo.create({
+  totalAmount: dto.amount,   // full price
+  depositAmount: dto.amount, // same as total
+  balanceAmount: 0,          // no remaining balance
+  status: 'pending',
+  first_name: dto.first_name,
+  last_name: dto.last_name,
+  email: dto.email,
+  phoneNumber: dto.phoneNumber,
+  district: dto.meta?.district,
+
+  product: internationalProduct,
+});
+
+  // 3️⃣ Save order and link to payment
+  await this.orderRepo.save(order);
+  payment.order = order;
+  await this.paymentsRepo.save(payment);
+}
+
+    // 3) Block dates
+    if (dto.type === 'bridal_hire' && dto.meta?.bookingDate) {
+      const date = new Date(dto.meta.bookingDate);
+      const offsets = [-1, 0, 1];
+      for (const o of offsets) {
+        const d = new Date(date);
+        d.setDate(d.getDate() + o);
+        const blocked = this.blockedRepo.create({
+          date: d.toISOString().slice(0, 10),
+          status: 'pending',
+          txRef,
+        });
+        await this.blockedRepo.save(blocked);
+      }
+    }
+
+    const headers = { Authorization: `Bearer ${process.env.PAYCHANGU_SECRET_KEY}`, Accept: 'application/json' };
+    const body = {
+      amount: String(dto.amount),
+      currency: dto.currency,
+      email: dto.email,
+      first_name: dto.first_name,
+      last_name: dto.last_name,
+      callback_url: `${process.env.FRONTEND_RETURN_URL}?tx_ref=${txRef}&type=${dto.type}`,
+
+      return_url: `${process.env.BACKEND_URL}/payments/redirect`,
+      tx_ref: txRef,
+      customization: { title: 'Curls Payment', description: dto.type === 'bridal_hire' ? 'Bridal hire booking' : 'International order' },
+      meta: dto.meta || {},
+      payment_methods: ['card','mobilemoney','banktransfer'],
+    };
+
+    const resp = await axios.post('https://api.paychangu.com/payment', body, { headers });
+    const checkoutUrl = resp.data?.data?.checkout_url;
+
+    return { checkout_url: checkoutUrl, tx_ref: txRef };
+  }
+
+async processWebhook(payload: any, headers: any) {
+  console.log("🔔 Webhook received:", payload);
+
+  const signature = headers['signature'] || headers['Signature'];
+ const secret = process.env.PAYCHANGU_WEBHOOK_SECRET ?? "";
+
+if (!secret) {
+  throw new Error("Missing PAYCHANGU_WEBHOOK_SECRET");
+}
+
+
+  if (!signature) throw new Error("Missing signature header");
+
+  // Compute expected signature
+  const computed = crypto
+    .createHmac('sha256', secret)
+    .update(JSON.stringify(payload))
+    .digest('hex');
+
+  // 🔐 Validate webhook
+  if (computed !== signature) {
+    console.log("❌ Signature mismatch");
+    throw new Error("Invalid webhook signature");
+  }
+
+  console.log("✅ Signature verified");
+
+  // PayChangu sends: "reference"
+  const txRef = payload.reference;
+
+  if (!txRef) throw new Error("Missing reference in webhook payload");
+
+  const payment = await this.paymentsRepo.findOne({
+    where: { transactionId: txRef },
+  });
+
+  if (!payment) throw new Error("Payment not found for txRef: " + txRef);
+
+  // ALWAYS verify again with PayChangu
+  const verifyResp = await axios.get(
+    `https://api.paychangu.com/verify-payment/${txRef}`,
+    { headers: { Authorization: `Bearer ${process.env.PAYCHANGU_SECRET_KEY}` } }
+  );
+
+  const data = verifyResp.data?.data;
+
+  if (!data || data.status !== "success") {
+    console.log("❌ Payment verification failed");
+    return { status: "failed", message: "Payment not verified" };
+  }
+
+  // Update payment
+  payment.status = "succeeded";
+  await this.paymentsRepo.save(payment);
+
+  console.log("🎉 Payment succeeded:", txRef);
+
+  // Bridal hire
+  if (payment.type === 'bridal_hire') {
+    await this.bookingsService.finalizeBooking({
+      txRef,
+      amount: payment.amount,
+    });
+  }
+
+  // Special order
+  // Special Order
+if (payment.type === 'special') {
+  await this.specialOrderRepo.update(
+    { txRef },
+    { status: "completed" }
+  );
+}
+
+
+  // International order
+  // International Order
+if (payment.type === 'international') {
+  await this.orderRepo.update(
+    { id: payment.order?.id },
+    { status: "completed" }
+  );
+}
+
+
+  return { status: "ok" };
+}
+
+
+async verifyPayment(txRef: string) {
+  console.log("🚀 Starting payment verification for:", txRef);
+
+  // 1️⃣ Fetch payment with all relations
+  const payment = await this.paymentsRepo.findOne({
+    where: { transactionId: txRef },
+    relations: [
+      'booking',
+      'booking.bridalWig',
+      'booking.bridalWig.product',
+      'order',
+      'order.product',
+    ],
+  });
+
+  if (!payment) {
+    console.error("❌ Payment not found for txRef:", txRef);
+    throw new Error('Payment not found');
+  }
+
+  console.log("✅ Payment fetched:", payment);
+
+  // 2️⃣ Verify with PayChangu
+  const headers = { Authorization: `Bearer ${process.env.PAYCHANGU_SECRET_KEY}` };
+  let resp;
+  try {
+    resp = await axios.get(`https://api.paychangu.com/verify-payment/${txRef}`, { headers });
+    console.log("✅ PayChangu verification response:", resp.data);
+  } catch (err) {
+    console.error("❌ Error verifying payment with PayChangu:", err);
+    throw err;
+  }
+
+  const data = resp.data?.data;
+
+  if (!data) {
+    console.warn("⚠️ Payment data is missing, status pending");
+    return { paychangu_status: 'pending' };
+  }
+
+  // 3️⃣ Handle successful payment
+  if (data.status === 'success') {
+    console.log("🎉 Payment successful, updating status...");
+
+    payment.status = 'succeeded';
+    await this.paymentsRepo.save(payment);
+
+    // 3a️⃣ Bridal Hire Booking
+    // 3a️⃣ Bridal Hire Booking
+if (payment.type === 'bridal_hire') {
+  console.log("💍 Processing Bridal Hire booking...");
+
+  // Finalize the booking first
+  await this.bookingsService.finalizeBooking({
+    txRef,
+    amount: Number(data.amount),
+  });
+
+  // Fetch the booking with the bridalWig relation
+  const booking = await this.bookingRepo.findOne({
+    where: { txRef },
+    relations: ['bridalWig'],
+  });
+
+  if (!booking) throw new Error('Booking not found after finalization');
+
+  const wigImageUrl = `http://localhost:8080${booking.bridalWig?.imageUrl || '/uploads/default-wig.png'}`;
+  console.log("🖼️ Wig image URL:", wigImageUrl);
+
+  if (booking.email) {
+    console.log("✉️ Sending email to customer:", booking.email);
+    await sendEmail(booking.email, "Booking Confirmed 🎉", bridalHireEmail(booking, wigImageUrl));
+  } else {
+    console.warn("⚠️ Booking email missing");
+  }
+
+  if (process.env.ADMIN_EMAIL) {
+    console.log("✉️ Sending email to admin:", process.env.ADMIN_EMAIL);
+    await sendEmail(process.env.ADMIN_EMAIL, "New Booking Received", bridalHireAdminEmail(booking, wigImageUrl));
+  }
+}
+
+
+if (payment.type === 'special' && payment.specialOrder) {
+  // mark payment succeeded
+  // update special order status and amounts
+  payment.specialOrder.status = 'processing'; // or 'confirmed'
+  // if deposit only - keep processing until balance paid
+  await this.specialOrderRepo.save(payment.specialOrder);
+
+  // Optionally: If your verification returned full amount equal to total, mark completed
+  if (Number(data.amount) >= Number(payment.specialOrder.totalAmount)) {
+    payment.specialOrder.status = 'completed';
+    payment.specialOrder.balanceAmount = 0;
+    await this.specialOrderRepo.save(payment.specialOrder);
+  }
+
+  // send emails to customer/admin — similar to internationalOrderEmail
+ // Special Order Email Notifications
+const img = 'http://your-host/uploads/default-wig.png';
+
+if (payment.specialOrder.email) {
+  await sendEmail(
+    payment.specialOrder.email,
+    'Special Order Received',
+    specialOrderEmail(payment.specialOrder, img)
+  );
+}
+
+if (process.env.ADMIN_EMAIL) {
+  await sendEmail(
+    process.env.ADMIN_EMAIL,
+    'New Special Order',
+    specialOrderAdminEmail(payment.specialOrder, img)
+  );
+}
+
+}
+
+    // 3b️⃣ International Orders
+   // 3b️⃣ International Orders
+if (payment.type === 'international' && payment.order) {
+  console.log("🌍 Processing International Order...");
+
+  // Update order status
+  payment.order.status = 'processing';
+  await this.orderRepo.save(payment.order);
+
+  // Fetch the order with product relation
+  const order = await this.orderRepo.findOne({
+    where: { id: payment.order.id },
+    relations: ['product'], 
+  });
+
+  if (!order) throw new Error('Order not found after update');
+
+  // ✅ Deactivate the purchased wig
+  if (order.product) {
+    order.product.active = false;
+    await this.internationalRepo.save(order.product);
+    console.log(`🛑 Marked wig "${order.product.wigName}" as inactive`);
+  }
+
+  // Wig info for emails
+  const wigName = order.product?.wigName || 'Unknown Wig';
+  const wigImageUrl = `http://localhost:8080${order.product?.imageUrl || '/uploads/default-wig.png'}`;
+  const emailOrder = { ...order, wigName };
+
+  if (order.email) {
+    console.log("✉️ Sending email to customer:", order.email);
+    await sendEmail(order.email, "Order Confirmed 🎉", internationalOrderEmail(emailOrder, wigImageUrl));
+  }
+
+  if (process.env.ADMIN_EMAIL) {
+    console.log("✉️ Sending email to admin:", process.env.ADMIN_EMAIL);
+    await sendEmail(process.env.ADMIN_EMAIL, "New International Order Received", internationalAdminEmail(emailOrder, wigImageUrl));
+  }
+}
+
+
+    console.log("✅ Payment processing complete for txRef:", txRef);
+
+    // 🔍 Load special order if exists
+const specialOrder = payment.meta?.specialOrderId
+  ? await this.specialOrderRepo.findOne({
+      where: { id: payment.meta.specialOrderId },
+    })
+  : null;
+
+// Update payment
+payment.status = 'succeeded';
+await this.paymentsRepo.save(payment);
+
+// Return correct shape
+return {
+  paychangu_status: 'success',
+  payment,
+  order: specialOrder,
+};
+
+  }
+
+  console.warn("❌ Payment failed for txRef:", txRef);
+  return { paychangu_status: 'failed', payment };
+}
+
+// 1️⃣ Get all payments (for admin)
+async getAllPayments() {
+  return this.paymentsRepo.find({
+    relations: ['booking', 'booking.bridalWig', 'booking.user', 'order', 'order.product', 'user'],
+    order: { id: 'DESC' },
+  });
+}
+
+// 2️⃣ Calculate total revenue from successful payments
+async getTotalRevenue() {
+  const result = await this.paymentsRepo
+    .createQueryBuilder('payment')
+    .select('SUM(payment.amount)', 'total')
+    .where('payment.status = :status', { status: 'succeeded' })
+    .getRawOne();
+
+  return { totalRevenue: Number(result.total || 0) };
+}
+
+async getAdminSummary() {
+  const payments = await this.paymentsRepo.find({
+    relations: [
+      'booking',
+      'booking.bridalWig',
+      'order',
+      'order.product',
+      'user'
+    ],
+    order: { id: 'DESC' }
+  });
+
+  const totalRevenue = payments
+    .filter(p => p.status === "succeeded")
+    .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+  const bookings = await this.bookingRepo.find();
+  const totalBookings = bookings.length;
+
+  const orders = await this.orderRepo.find();
+  const totalOrders = orders.length;
+
+  const monthlyTotals = Array(12).fill(0);
+  payments.forEach(p => {
+    if (!p.createdAt) return;
+    const month = new Date(p.createdAt).getMonth();
+    monthlyTotals[month] += Number(p.amount || 0);
+  });
+
+  return {
+    totalRevenue,
+    totalBookings,
+    totalOrders,
+    monthlyTotals,
+    recentPayments: payments.slice(0, 10)
+  };
+}
+
+}
