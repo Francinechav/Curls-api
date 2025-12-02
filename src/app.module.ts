@@ -52,6 +52,9 @@ dotenv.config();
         Texture, Setting, PriceTier
       ],
       synchronize: true,
+      ssl: {
+    rejectUnauthorized: false, 
+  },
     }),
 
     BookingsModule,
