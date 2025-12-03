@@ -1,88 +1,73 @@
 import { Controller, Get, Post, Body, UploadedFile, UseInterceptors, Param } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { diskStorage } from 'multer';
 import { InternationalProductsService } from './international-product.service';
 import { Product } from 'src/entities/product';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { cloudinaryStorage } from '../config/multer-cloudinary.config';
 
 @Controller('international-products')
 export class InternationalProductsController {
   constructor(
     private readonly productsService: InternationalProductsService,
     @InjectRepository(Product)
-    private readonly productRepository: Repository<Product>, // <-- inject here
+    private readonly productRepository: Repository<Product>,
   ) {}
 
+  /** Get all active international products */
   @Get()
   async getAll() {
     return this.productsService.getAllActiveProducts();
   }
 
-  // NEW: Upload international product with image
+  /** Upload international product with image to Cloudinary */
   @Post('upload')
-@UseInterceptors(
-  FileInterceptor('image', {
-    storage: diskStorage({
-      destination: './uploads',
-      filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-        cb(null, uniqueSuffix + '-' + file.originalname);
-      },
-    }),
-  }),
-)
-async uploadProduct(
-  @UploadedFile() file: Express.Multer.File,
-  @Body() body: {
-    wigName: string;
-    Colour: string;
-    lengths: string;
-    price: string;
-    description?: string;
-    productId: number;
-       // must exist in products table
-  },
-) {
-  const lengthsArray = body.lengths ? body.lengths.split(',').map(s => s.trim()) : [];
+  @UseInterceptors(FileInterceptor('image', { storage: cloudinaryStorage }))
+  async uploadProduct(
+    @UploadedFile() file: Express.Multer.File,
+    @Body() body: {
+      wigName: string;
+      Colour: string;
+      lengths: string;
+      price: string;
+      description?: string;
+      productId: number;
+    },
+  ) {
+    const lengthsArray = body.lengths.split(',').map(s => s.trim());
+    const imageUrl = file?.path;
 
-  // IMPORTANT: fetch the existing product from DB
-  const product = await this.productRepository.findOne({ where: { id: body.productId, type: 'international' } });
-  if (!product) {
-    throw new Error('Product not found or not international type');
+    // Verify product exists and is international
+    const product = await this.productRepository.findOne({ where: { id: body.productId, type: 'international' } });
+    if (!product) throw new Error('Product not found');
+
+    return this.productsService.createProduct({
+      wigName: body.wigName,
+      Colour: body.Colour,
+      lengths: lengthsArray,
+      price: parseFloat(body.price),
+      description: body.description,
+      imageUrl,
+      active: true,
+      product,
+    });
   }
 
-  return this.productsService.createProduct({
-    wigName: body.wigName,
-    Colour: body.Colour, 
-    lengths: lengthsArray,
-    price: parseFloat(body.price),
-    description: body.description,
-    imageUrl: file ? `/uploads/${file.filename}` : undefined,
-    active: true,
-    product: product,
-  });
-}
+  /** ADMIN: Get all international wigs */
+  @Get('admin/all')
+  async getAllAdmin() {
+    return this.productsService.getAllAdmin();
+  }
 
-/** ADMIN: Get ALL international wigs (active + inactive) */
-@Get('admin/all')
-async getAllAdmin() {
-  return this.productsService.getAllAdmin();
-}
+  /** Get single international product by ID */
+  @Get(':id')
+  async getOne(@Param('id') id: number) {
+    return this.productsService.findOne(id);
+  }
 
-// international-products.controller.ts
-
-@Get(':id')
-async getOne(@Param('id') id: number) {
-  return this.productsService.findOne(id);
-}
-
-// orders.controller.ts
-
-@Get('by-wig/:wigId')
-async getByWig(@Param('wigId') wigId: number) {
-  return this.productsService.findByWigId(wigId);
-}
-
-
+  /** Get orders by wig ID */
+  @Get('by-wig/:wigId')
+  async getByWig(@Param('wigId') wigId: number) {
+    return this.productsService.findByWigId(wigId);
+  }
 }

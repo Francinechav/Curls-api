@@ -7,9 +7,6 @@ import { AdminSeederService } from './seeds/admin-seeder.service';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // Serve static uploads
-  app.use('/uploads', express.static(join(__dirname, '..', 'uploads')));
-
   // Enable CORS
 app.enableCors({
   origin: [process.env.FRONTEND_ORIGIN],
