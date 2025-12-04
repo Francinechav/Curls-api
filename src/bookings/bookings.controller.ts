@@ -1,5 +1,8 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { BookingsService } from './bookings.service';
+import { JwtAuthGuard } from 'src/jwt/jwt-auth.guard';
+import { RolesGuard } from 'src/auth/roles.guard';
+import { Roles } from 'src/auth/roles.decorator';
 
 @Controller('bookings')
 export class BookingsController {
@@ -26,7 +29,8 @@ async getByWig(@Param('wigId') wigId: number) {
   return this.bookingsService.findByWig(+wigId);
 }
 
-// Admin endpoint: get all bookings
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles('admin')
 @Get('admin/all')
 getAllBookings() {
   return this.bookingsService.getAllBookings();
