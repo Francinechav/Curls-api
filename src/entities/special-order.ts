@@ -66,8 +66,8 @@ deliveryWindowDays: number;
  district?: string;
 
 
-  @OneToMany(() => Payment, payment => (payment as any).specialOrder)
-  payments?: Payment[];
+  @OneToMany(() => Payment, payment => payment.specialOrder)
+payments?: Payment[];
 
   @CreateDateColumn()
   createdAt: Date;
