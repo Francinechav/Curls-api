@@ -75,10 +75,10 @@ if (dto.type === 'bridal_hire') {
     await this.paymentsRepo.save(payment);
 
  // inside createCheckoutSession(dto)
+// Special orders
 if (dto.type === 'special') {
-  // meta is expected to contain texture, colour, length, totalAmount
   const meta = dto.meta || {};
-  const total = Number(meta.totalAmount ?? (dto.amount * 2)); // fallback
+  const total = Number(meta.totalAmount ?? (dto.amount * 2));
   const deposit = Number(dto.amount);
 
   const specialOrder = this.specialOrderRepo.create({
@@ -89,23 +89,24 @@ if (dto.type === 'special') {
     depositAmount: deposit,
     balanceAmount: Math.max(0, total - deposit),
     status: 'pending',
-    txRef, // txRef generated above
+    txRef,
     deliveryWindowDays: 14,
     first_name: dto.first_name,
     last_name: dto.last_name,
     email: dto.email,
     phoneNumber: dto.phoneNumber,
     district: meta.district,
-
     user: dto.userId ? ({ id: dto.userId } as any) : undefined,
   });
+
   await this.specialOrderRepo.save(specialOrder);
 
+  // ✅ Crucial: Link payment to this special order
+  payment.specialOrder = specialOrder;
   payment.meta = { ...(payment.meta || {}), specialOrderId: specialOrder.id };
   await this.paymentsRepo.save(payment);
 }
 
- 
  
     // ✅ 2.5) If international order, create order record
 if (dto.type === 'international') {
