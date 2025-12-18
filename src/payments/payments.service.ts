@@ -358,7 +358,6 @@ async processWebhook(payload: any, headers: any) {
 async verifyPayment(txRef: string) {
   console.log("🚀 Starting payment verification for:", txRef);
 
-  // 1️⃣ Load payment
   const payment = await this.paymentsRepo.findOne({
     where: { transactionId: txRef },
     relations: [
@@ -374,21 +373,41 @@ async verifyPayment(txRef: string) {
     throw new NotFoundException("Payment not found");
   }
 
-  // If webhook ALREADY completed business logic → just return status
+let order: Order | SpecialOrder | null = null;
+let orderType: "normal" | "special" | null = null;
+
+  if (payment.specialOrder) {
+    order = payment.specialOrder;
+    orderType = "special";
+  } else if (payment.order) {
+    order = payment.order;
+    orderType = "normal";
+  }
+
+  console.log("🧾 PAYMENT:", payment.id);
+  console.log("📦 ORDER TYPE:", orderType);
+  console.log("📦 ORDER DATA:", order);
+
+  // If webhook already processed
   if (payment.status === "succeeded") {
     return {
       paychangu_status: "success",
-      payment,
+      order,
+      orderType,
       note: "Already processed by webhook",
     };
   }
 
-  // 2️⃣ Verify with PayChangu
+  // Verify with PayChangu
   let resp;
   try {
     resp = await axios.get(
       `https://api.paychangu.com/verify-payment/${txRef}`,
-      { headers: { Authorization: `Bearer ${process.env.PAYCHANGU_SECRET_KEY}` } }
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.PAYCHANGU_SECRET_KEY}`,
+        },
+      }
     );
   } catch (err) {
     console.error("⚠️ PayChangu verification error");
@@ -398,26 +417,25 @@ async verifyPayment(txRef: string) {
   const data = resp?.data?.data;
   if (!data) return { paychangu_status: "pending" };
 
-  // 3️⃣ Payment FAILED → return safe response
   if (data.status !== "success") {
     return {
       paychangu_status: "failed",
-      payment,
+      order: null,
+      orderType: null,
     };
   }
 
-  // 4️⃣ Payment succeeded BUT webhook did not run yet
-  // IMPORTANT: VERIFY ENDPOINT MUST NOT finalize booking/order
-  // Webhook handles it asynchronously.
   payment.status = "succeeded";
   await this.paymentsRepo.save(payment);
 
   return {
     paychangu_status: "success",
-    payment,
+    order,
+    orderType,
     note: "Marked succeeded. Webhook will finalize business logic.",
   };
 }
+
 
 
 // 1️⃣ Get all payments (for admin)
