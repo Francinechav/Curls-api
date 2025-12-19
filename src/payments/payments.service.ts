@@ -260,16 +260,21 @@ if (payment.type === "special" && !payment.specialOrder) {
 }
 
 // 🔗 ENSURE payment is linked to international order
+// 🔗 ENSURE payment is linked to international order
+// 🔗 ENSURE payment is linked to international order
 if (payment.type === "international" && !payment.order) {
-  const order = await this.orderRepo.findOne({
-    where: { id: payment.meta?.orderId },
+  const paymentWithOrder = await this.paymentsRepo.findOne({
+    where: { transactionId: txRef },
+    relations: ["order"],
   });
 
-  if (order) {
-    payment.order = order;
+  if (paymentWithOrder?.order) {
+    payment.order = paymentWithOrder.order;
     await this.paymentsRepo.save(payment);
   }
 }
+
+
 
   // 1️⃣ BRIDAL HIRE BOOKING
   // ---------------------------
