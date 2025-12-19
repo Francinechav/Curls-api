@@ -12,8 +12,6 @@ import * as crypto from 'crypto';
 import { Order } from '../entities/order';
 import { InternationalProduct } from '../entities/international-product';
 
-
-
 import { sendEmail } from "../utils/email";
 import {
   bridalHireEmail,
@@ -38,8 +36,7 @@ export class PaymentsService {
 
     @Inject(forwardRef(() => BookingsService)) private bookingsService: BookingsService,
   ) {}
-
-  async createCheckoutSession(dto: InitiatePaymentDto) {
+async createCheckoutSession(dto: InitiatePaymentDto) {
     // 1) Create temp booking
     // 1) Generate txRef differently for each type
 let txRef: string;
@@ -244,11 +241,36 @@ async processWebhook(payload: any, headers: any) {
 
   console.log("🎉 PAYMENT SUCCESS — Processing:", txRef);
 
+
+
   // Update payment status
   payment.status = "succeeded";
   await this.paymentsRepo.save(payment);
 
-  // ---------------------------
+  // 🔗 ENSURE payment is linked to special order
+if (payment.type === "special" && !payment.specialOrder) {
+  const specialOrder = await this.specialOrderRepo.findOne({
+    where: { txRef },
+  });
+
+  if (specialOrder) {
+    payment.specialOrder = specialOrder;
+    await this.paymentsRepo.save(payment);
+  }
+}
+
+// 🔗 ENSURE payment is linked to international order
+if (payment.type === "international" && !payment.order) {
+  const order = await this.orderRepo.findOne({
+    where: { id: payment.meta?.orderId },
+  });
+
+  if (order) {
+    payment.order = order;
+    await this.paymentsRepo.save(payment);
+  }
+}
+
   // 1️⃣ BRIDAL HIRE BOOKING
   // ---------------------------
   if (payment.type === "bridal_hire") {
