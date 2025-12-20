@@ -10,15 +10,32 @@ export class JwtAuthGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<Request>();
     const authHeader = request.headers.authorization;
 
-    if (!authHeader) return false;
+    console.log('🔐 Auth Guard Triggered');
+    console.log('➡️ Authorization Header:', authHeader);
 
-    const token = authHeader.split(' ')[1];
+    if (!authHeader) {
+      console.log('❌ No Authorization header found');
+      return false;
+    }
+
+    const parts = authHeader.split(' ');
+
+    if (parts.length !== 2 || parts[0] !== 'Bearer') {
+      console.log('❌ Invalid Authorization format:', parts);
+      return false;
+    }
+
+    const token = parts[1];
+    console.log('🪪 Token received:', token);
 
     try {
       const payload = this.jwtService.verify(token);
+      console.log('✅ Token verified. Payload:', payload);
+
       request['user'] = payload;
       return true;
-    } catch {
+    } catch (error) {
+      console.log('❌ Token verification failed:', error.message);
       return false;
     }
   }
