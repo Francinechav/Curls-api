@@ -118,10 +118,16 @@ if (dto.type === 'international') {
   const internationalProduct = await this.internationalRepo.findOne({
     where: { id: meta.productId },
   });
+  
 
   if (!internationalProduct) {
     throw new NotFoundException("International product not found");
   }
+  
+  if (!internationalProduct.active) {
+  throw new BadRequestException("This wig has already been sold");
+}
+
 
   // 2️⃣ Create the order with full entity
   const order = this.orderRepo.create({
@@ -343,40 +349,53 @@ if (payment.type === "international" && !payment.order) {
   // ---------------------------
   // 3️⃣ INTERNATIONAL ORDERS
   // ---------------------------
-  if (payment.type === "international") {
-    console.log("🌍 Processing international order...");
+  // ---------------------------
+// 3️⃣ INTERNATIONAL ORDERS
+// ---------------------------
+if (payment.type === "international") {
+  console.log("🌍 Webhook: Processing international order");
+  console.log("➡️ Payment ID:", payment.id);
+  console.log("➡️ Linked order ID:", payment.order?.id);
 
-    const order = await this.orderRepo.findOne({
-      where: { id: payment.order?.id },
-      relations: ["product"]
-    });
+  const order = await this.orderRepo.findOne({
+    where: { id: payment.order?.id },
+    relations: ["product"],
+  });
 
-    if (order) {
-      order.status = "processing";
-      await this.orderRepo.save(order);
+  console.log("📦 Order found:", !!order);
+  console.log("👗 Product found:", !!order?.product);
 
-      // deactivate product
-      if (order.product) {
-        order.product.active = false;
-        await this.internationalRepo.save(order.product);
-      }
-
-      const wigImageUrl = `http://localhost:8080${order.product?.imageUrl}`;
-      const wigName = order.product?.wigName || "International Wig";
-
-      await sendEmail(
-        order.email,
-        "Order Confirmed 🎉",
-        internationalOrderEmail({ ...order, wigName }, wigImageUrl)
-      );
-
-      await sendEmail(
-        process.env.ADMIN_EMAIL!,
-        "New International Order Received",
-        internationalAdminEmail({ ...order, wigName }, wigImageUrl)
-      );
-    }
+  if (!order || !order.product) {
+    console.error("❌ Missing order or product — cannot deactivate wig");
+    return { status: "order_or_product_missing" };
   }
+
+  console.log("🔍 BEFORE update — active =", order.product.active);
+
+  order.status = "processing";
+  await this.orderRepo.save(order);
+
+  order.product.active = false;
+  await this.internationalRepo.save(order.product);
+
+  console.log("✅ AFTER update — active =", order.product.active);
+
+  const wigImageUrl = `http://localhost:8080${order.product.imageUrl}`;
+  const wigName = order.product.wigName || "International Wig";
+
+  await sendEmail(
+    order.email,
+    "Order Confirmed 🎉",
+    internationalOrderEmail({ ...order, wigName }, wigImageUrl)
+  );
+
+  await sendEmail(
+    process.env.ADMIN_EMAIL!,
+    "New International Order Received",
+    internationalAdminEmail({ ...order, wigName }, wigImageUrl)
+  );
+}
+
 
   return { status: "ok" };
 }
