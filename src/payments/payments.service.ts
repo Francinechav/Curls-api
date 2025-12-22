@@ -475,6 +475,27 @@ let orderType: "normal" | "special" | null = null;
   payment.status = "succeeded";
   await this.paymentsRepo.save(payment);
 
+// 🔁 FALLBACK: finalize international order if webhook did NOT run
+if (payment.type === "international" && payment.order) {
+  const fullOrder = await this.orderRepo.findOne({
+    where: { id: payment.order.id },
+    relations: ["product"],
+  });
+  
+
+  if (fullOrder && fullOrder.product && fullOrder.product.active) {
+    console.log("⚠️ Webhook missed — finalizing international order in verifyPayment");
+
+    fullOrder.status = "processing";
+    await this.orderRepo.save(fullOrder);
+
+    fullOrder.product.active = false;
+    await this.internationalRepo.save(fullOrder.product);
+
+    console.log("✅ Product deactivated via verifyPayment fallback");
+  }
+}
+
   return {
     paychangu_status: "success",
     order,
